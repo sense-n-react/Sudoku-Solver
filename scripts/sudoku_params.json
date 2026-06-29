@@ -1,0 +1,12 @@
+{
+  "blur_kernel_divisor": 130,
+  "adaptive_block_divisor": 30,
+  "adaptive_c": 10,
+  "frame_min_ratio": 0.667,
+  "warp_margin": 0.05,
+  "blank_dark_ratio": 0.06,
+  "cell_crop_ratio": 0.45,
+  "match_score_threshold": 0.5,
+  "match_off_x_min": 0.2,
+  "match_off_x_max": 0.81
+}
