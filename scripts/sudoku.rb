@@ -43,23 +43,18 @@ begin
   raise "外枠を検出できませんでした" unless frame_bin
   save_step( frame_bin, "02_frame.png",  "枠線抽出" )
 
-  # frame_bin 以外を digits_bin とする。
-  # digits_bin は 0/255 の二値画像（数字=黒・背景=白）
-  digits_mask  = cv2.bitwise_and( inv, cv2.bitwise_not( frame_bin ) )
-  digits_bin   = CV2.threshold( digits_mask, 0, 255, cv2.THRESH_BINARY_INV )
-  save_step( digits_bin, "03_digits_only.png", "数字のみ" )
-
   #
   # (3) 最大輪郭の可視化
   #
   contours, _ = cv2.findContours( frame_bin.copy,
                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE )
   outer_contour = contours.to_a.max_by { |c| CV2.contour_area(c).to_f }
+
   contour_img = cv2.cvtColor( frame_bin, cv2.COLOR_GRAY2BGR )
   PY.contour_pts( outer_contour).to_a.each do |p|
     CV2.circle( contour_img, p[0], p[1], 6, 0, 0, 255, -1 )
   end
-  save_step(contour_img, "04_contour.png", "最大輪郭" )
+  save_step(contour_img, "03_contour.png", "最大輪郭" )
 
   #
   # (4) コーナー検出
@@ -72,25 +67,58 @@ begin
     CV2.circle( corners_img, c[0], c[1], 30, 0, 255, 0, 6)
     CV2.put_text( corners_img, i, c[0] + 20, c[1] + 0, cv2.FONT_HERSHEY_SIMPLEX, 4.0, 0, 0, 255, 8)
   end
-  save_step( corners_img, "05_corners.png", "コーナー検出" )
+  save_step( corners_img, "04_corners.png", "コーナー検出" )
 
   #
-  # (5) 射影補正
+  # (5) 枠内の数字だけの画像をできるだけ抽出する
+  #
+  # frame_bin 以外を digits_bin とする。
+  # digits_bin は 0/255 の二値画像（数字=黒・背景=白）
+  digits_mask = cv2.bitwise_and( inv, cv2.bitwise_not( frame_bin ) )
+  digits_bin  = CV2.threshold( digits_mask, 0, 255, cv2.THRESH_BINARY_INV )
+
+  # さらに検出した4コーナーで囲まれた四角形の外側を digits_bin からマスクして除去
+  h_, w_ = PY.shape(inv).to_a.map(&:to_i)
+  quad_mask  = PY.full_gray(h_, w_, 0)
+  CV2.fill_poly(quad_mask, corners, 255)
+  digits_bin = cv2.bitwise_and(digits_bin, quad_mask)
+
+  cell_area  = CV2.contour_area(outer_contour).to_f / 81.0
+  digits_bin = remove_small_components( digits_bin, cell_area )
+
+  save_step( digits_bin, "05_digits_only.png", "数字のみ" )
+
+  #
+  # (6) 射影補正
   #
   sq_size = PY.shape(inv).to_a.map(&:to_i).min
   persp_m = get_perspective_transform( corners, sq_size )
 
-  square = cv2.warpPerspective( digits_bin, persp_m, [sq_size, sq_size] )
-  save_step( square, "06_warped.png", "射影補正" )
+  square        = cv2.warpPerspective( digits_bin, persp_m, [sq_size, sq_size] )
+  warped_frame  = cv2.warpPerspective( frame_bin,  persp_m, [sq_size, sq_size] )
+  square, pts_y, pts_x = correct_curvature( warped_frame, square, sq_size, outer_contour, corners )
+
+  dbg = cv2.cvtColor( warped_frame, cv2.COLOR_GRAY2BGR )
+  pts_y.each_with_index do |row, i|
+    row.each_with_index do |py, j|
+      CV2.circle( dbg, pts_x[i][j], py, 8, 0, 0, 255, -1 )
+    end
+  end
+  save_step( dbg, "06b_remap_debug.png", "曲げ補正交点" )
+
+  warped_img = cv2.cvtColor( square, cv2.COLOR_GRAY2BGR )
+  draw_grid( warped_img, sq_size )
+  save_step( warped_img, "06_warped.png", "射影補正" )
 
   #
-  # (6) 数字認識
+  # (7) 数字認識
   #
   load_digit_template()
-  cells = extract_numbers( square )
+  cells, matched_imgs = extract_numbers( square )
 
   recognized_img = cv2.cvtColor( square, cv2.COLOR_GRAY2BGR )
-  overlay = build_recognized_overlay( sq_size, cells)
+  draw_grid( recognized_img, sq_size )
+  overlay = build_recognized_overlay( sq_size, cells, matched_imgs )
   mask    = CV2.threshold( CV2.bgr_to_gray(overlay), 1, 255, cv2.THRESH_BINARY )
   PY.copy_where( recognized_img, overlay, mask )
   save_step( recognized_img, "07_recognized.png", "数字認識" )
@@ -98,14 +126,13 @@ begin
   raise "認識結果に矛盾があります（同じ行/列/ブロックに重複数字）" unless board_consistent?(cells)
 
   #
-  # (7) 数独を解く
+  # (8) 数独を解く
   #
   answer, process = Board::solve( cells.join( ' ' ) )
-
   raise "数独を解けませんでした（認識ミスの可能性があります）" unless answer
 
   #
-  # (8) 答えを重ね合わせ
+  # (9) 答えを重ね合わせ
   #
   result_img = overlay_answer( img, cells, answer, sq_size, persp_m )
   save_step( result_img, "08_result.png", "解答" )

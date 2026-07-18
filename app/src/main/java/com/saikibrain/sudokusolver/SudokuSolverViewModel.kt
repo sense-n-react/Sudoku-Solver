@@ -51,15 +51,16 @@ class SudokuSolverViewModel : ViewModel() {
 
     /** Ruby の save_step が書き出すファイル名 → ステップ表示ラベルの対応 */
     private val stepLabelMap = mapOf(
-        "01_binary.png"               to "二値化",
-        "02_frame_candidates.png"     to "外枠候補",
-        "02_frame.png"                to "枠線抽出",
-        "03_digits_only.png"          to "数字のみ",
-        "04_contour.png"     to "最大輪郭",
-        "05_corners.png"     to "コーナー検出",
-        "06_warped.png"      to "射影補正",
-        "07_recognized.png"  to "数字認識",
-        "08_result.png"      to "解答",
+        "01_binary.png"           to "二値化",
+        "02_frame_candidates.png" to "外枠候補",
+        "02_frame.png"            to "枠線抽出",
+        "03_contour.png"          to "最大輪郭",
+        "04_corners.png"          to "コーナー検出",
+        "05_digits_only.png"      to "数字のみ",
+        "06_warped.png"           to "射影補正",
+        "06b_remap_debug.png"     to "曲げ補正交点",
+        "07_recognized.png"       to "数字認識",
+        "08_result.png"           to "解答",
     )
 
     // ── 公開 API ────────────────────────────────────────────────

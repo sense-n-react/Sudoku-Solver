@@ -11,14 +11,14 @@
 
 ```
 Android アプリ (Kotlin / Jetpack Compose)
-  │  画像を /sdcard/Download/SudokuSolver/input.jpg にコピー
+  │  画像を /sdcard/Documents/SudokuSolver/input.jpg にコピー
   │  Termux RUN_COMMAND で sudoku.rb を起動
   ▼
 Termux (Ruby + PyCall + OpenCV)
   ├── sudoku.rb       … エントリポイント・JSON 出力
   ├── sudoku_ocr.rb   … 画像処理・数字認識（OCR）
   └── sudoku_solver.rb … 数独ソルバー（ロジック解法 + バックトラック）
-  │  処理ステップ画像を /sdcard/Download/SudokuSolver/sudoku_work/ に書き出し
+  │  処理ステップ画像を /sdcard/Documents/SudokuSolver/sudoku_work/ に書き出し
   │  解析結果を JSON で stdout に出力
   ▼
 Android アプリ
@@ -129,7 +129,7 @@ scp -P 8022 scripts/* sudoku_template.png <IP>:~/SudokuSolver/
 カスタマイズする場合は以下にコピーしてください。
 
 ```bash
-cp scripts/sudoku_params.json /sdcard/Download/SudokuSolver/sudoku_params.json
+cp scripts/sudoku_params.json /sdcard/Documents/SudokuSolver/sudoku_params.json
 ```
 
 アプリ内の「設定」画面からも編集・保存できます。
@@ -166,7 +166,7 @@ SudokuSolver/
 
 ## 共有ディレクトリ
 
-Android ↔ Termux 間のファイルやり取りは `/sdcard/Download/SudokuSolver/` を使います。
+Android ↔ Termux 間のファイルやり取りは `/sdcard/Documents/SudokuSolver/` を使います。
 
 | ファイル | 内容 |
 |---|---|

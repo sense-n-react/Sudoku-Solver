@@ -63,6 +63,10 @@ class Cell
     "(%d,%d)" % [@x + 1, @y + 1]
   end
 
+  def inspect
+    "#<Cell: @x=#{@x}, @y=#{@y}, @val=#{val}>"
+  end
+
 end  # class
 
 #

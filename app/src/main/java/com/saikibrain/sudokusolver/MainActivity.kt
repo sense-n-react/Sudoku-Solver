@@ -73,7 +73,7 @@ class MainActivity : ComponentActivity() {
 
     /** Ruby スクリプトと入出力の共有ディレクトリ（Termux も読み書きできる） */
     private val sharedDir: String get() =
-        "${Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        "${Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
             .absolutePath}/SudokuSolver"
 
     private lateinit var vm: SudokuSolverViewModel
@@ -218,7 +218,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * content:// URI または file:// URI の画像を /sdcard/Download/SudokuSolver/input.jpg にコピーする。
+     * content:// URI または file:// URI の画像を /sdcard/Documents/SudokuSolver/input.jpg にコピーする。
      * Termux から同じパスでアクセスできるようにするための中継ステップ。
      */
     private fun copyImageToShared(uri: Uri): String? {
@@ -323,8 +323,8 @@ fun SudokuSolverScreen(
 @Composable
 private fun SudokuSolverContent(
     viewModel: SudokuSolverViewModel,
-    onGalleryClick: (initialUri: Uri?) -> Unit,
-    loadLastImageUri: () -> Uri?,
+    @Suppress("UNUSED_PARAMETER") onGalleryClick: (initialUri: Uri?) -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") loadLastImageUri: () -> Uri? = { null },
     onSolveClick: (scriptPath: String, retryMode: Boolean) -> Unit,
     onStepSelected: (ProcessingStep) -> Unit,
     onImageCaptured: (File) -> Unit,
@@ -340,17 +340,33 @@ private fun SudokuSolverContent(
     val solveProcess    by viewModel.solveProcess.collectAsStateWithLifecycle()
     val scrollState = rememberScrollState()
 
-    var showFolderSheet by remember { mutableStateOf(false) }
-    var retryMode       by remember { mutableStateOf(false) }
+    var showFileBrowser  by remember { mutableStateOf(false) }
+    var retryMode        by remember { mutableStateOf(false) }
 
-    if (showFolderSheet) {
-        FolderPickerSheet(
-            lastImageUri = loadLastImageUri(),
-            onDismiss = { showFolderSheet = false },
-            onFolderSelected = { folderUri ->
-                showFolderSheet = false
-                onGalleryClick(folderUri)
-            }
+    val context = LocalContext.current
+    val prefs   = remember { context.getSharedPreferences("sudoku_prefs", Context.MODE_PRIVATE) }
+    val defaultFolder = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+    var fileBrowserRoot by remember {
+        mutableStateOf(
+            prefs.getString("browser_last_folder", null)
+                ?.let { File(it).takeIf { f -> f.isDirectory } }
+                ?: defaultFolder
+        )
+    }
+
+    if (showFileBrowser) {
+        FileBrowserSheet(
+            initialFolder = fileBrowserRoot,
+            onDismiss = { showFileBrowser = false },
+            onFileSelected = { uri ->
+                showFileBrowser = false
+                uri.path?.let { File(it).parentFile?.takeIf { f -> f.isDirectory } }
+                    ?.also { folder ->
+                        fileBrowserRoot = folder
+                        prefs.edit().putString("browser_last_folder", folder.absolutePath).apply()
+                    }
+                viewModel.onImageSelected(uri)
+            },
         )
     }
 
@@ -432,7 +448,7 @@ private fun SudokuSolverContent(
                 Text(if (showCamera) "キャンセル" else "撮影")
             }
             OutlinedButton(
-                onClick = { showFolderSheet = true },
+                onClick = { showFileBrowser = true },
                 modifier = Modifier.weight(1f)
             ) {
                 Icon(Icons.Default.Image, contentDescription = null)
