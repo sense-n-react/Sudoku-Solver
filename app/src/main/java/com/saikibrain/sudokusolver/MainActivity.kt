@@ -63,6 +63,8 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Size
 import com.saikibrain.sudokusolver.ui.theme.SudokuSolverTheme
 import java.io.File
 
@@ -686,7 +688,10 @@ fun ZoomableImage(
         contentAlignment = Alignment.Center
     ) {
         AsyncImage(
-            model = uri,
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(uri)
+                .size(Size.ORIGINAL)
+                .build(),
             contentDescription = contentDescription,
             contentScale = ContentScale.Fit,
             modifier = Modifier

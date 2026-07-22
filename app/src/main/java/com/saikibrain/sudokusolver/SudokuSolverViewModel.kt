@@ -60,7 +60,7 @@ class SudokuSolverViewModel : ViewModel() {
         "06_warped.png"           to "射影補正",
         "06b_remap_debug.png"     to "曲げ補正交点",
         "07_recognized.png"       to "数字認識",
-        "08_result.png"           to "解答",
+        "08_result.jpg"           to "解答",
     )
 
     // ── 公開 API ────────────────────────────────────────────────
@@ -206,7 +206,7 @@ class SudokuSolverViewModel : ViewModel() {
         _processingSteps.value = current + step
 
         // 解答ステップはメインプレビューにも反映
-        if (filename == "08_result.png") {
+        if (filename == "08_result.jpg") {
             _imageUri.value = Uri.fromFile(file)
         }
     }

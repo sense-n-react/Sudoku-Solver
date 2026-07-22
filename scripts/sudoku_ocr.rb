@@ -22,8 +22,8 @@ PyCall.exec(<<~PYTHON)
   def circle(img, x, y, radius, b, g, r, thickness):
       cv2.circle(img, (int(x), int(y)), int(radius), (b, g, r), int(thickness))
 
-  def rectangle(img, x1, y1, x2, y2, val, thickness):
-      cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), val, int(thickness))
+  def rectangle(img, x1, y1, x2, y2, b, g, r, thickness):
+      cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (b, g, r), int(thickness))
 
   def line(img, x1, y1, x2, y2, b, g, r, thickness):
       cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)), (b, g, r), int(thickness))
@@ -51,6 +51,13 @@ PyCall.exec(<<~PYTHON)
       pts = np.argwhere(labels == int(label))[:, ::-1].reshape(-1, 1, 2).astype(np.float32)
       return float(cv2.contourArea(cv2.convexHull(pts))) if len(pts) >= 3 else 0.0
 
+  def remove_labels(img, labels, garbage_labels):
+      """garbage_labels に含まれるラベルの画素を img から一括除去して返す"""
+      mask = np.isin(labels, list(garbage_labels))
+      out  = img.copy()
+      out[mask] = 0
+      return out
+
   def find_nonzero(img):
       return cv2.findNonZero(img)
 
@@ -61,6 +68,16 @@ PyCall.exec(<<~PYTHON)
   def match_template(tmpl_f, cell_r):
       return cv2.matchTemplate(tmpl_f, cell_r, cv2.TM_SQDIFF_NORMED)
 
+  def invert_matrix(m):
+      return np.linalg.inv(np.array(m, dtype=np.float64))
+
+  def blend_masked(result, warped, y1, y2, x1, x2):
+      mask = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY) > 1
+      result[int(y1):int(y2), int(x1):int(x2)][mask] = warped[mask]
+
+  def copy_cell(dst, src, r1, r2, c1, c2):
+      dst[int(r1):int(r2), int(c1):int(c2)] = src[int(r1):int(r2), int(c1):int(c2)]
+
   def bgr_to_gray(img):
       return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
@@ -69,6 +86,9 @@ PyCall.exec(<<~PYTHON)
 
   def approx_poly_dp(contour, epsilon, closed):
       return cv2.approxPolyDP(contour, epsilon, closed)
+
+  def corner_min_eigen_val(img, block_size, ksize):
+      return cv2.cornerMinEigenVal(img.astype(np.float32), int(block_size), int(ksize))
 
   # ── PY.xxx : numpy 操作 ──────────────────────────────────────
   class _PY:
@@ -125,45 +145,26 @@ PyCall.exec(<<~PYTHON)
         """各行に200未満のピクセルがあるか bool リストで返す"""
         return (img < 200).any(axis=1).tolist()
 
-  def corner_min_eigen_val(img, block_size, ksize):
-      return cv2.cornerMinEigenVal(img.astype(np.float32), int(block_size), int(ksize))
+    @staticmethod
+    def array_max(arr):
+        return float(arr.max())
 
-  def eigen_window_centroid(eigen_map, ey, ex, hw, thresh, max_shift, sq_size):
-      """期待位置周辺の最小固有値マップ加重重心を返す。[cy, cx, peak] または None。"""
-      y1 = max(0, int(ey) - int(hw)); y2 = min(int(sq_size), int(ey) + int(hw) + 1)
-      x1 = max(0, int(ex) - int(hw)); x2 = min(int(sq_size), int(ex) + int(hw) + 1)
-      local = eigen_map[y1:y2, x1:x2]
-      mask  = local > float(thresh)
-      if not mask.any():
-          return None
-      weights = local[mask]
-      ys, xs  = np.argwhere(mask).T
-      cy = float((weights * (y1 + ys)).sum() / weights.sum())
-      cx = float((weights * (x1 + xs)).sum() / weights.sum())
-      if abs(cy - float(ey)) < float(max_shift) and abs(cx - float(ex)) < float(max_shift):
-          return [cy, cx, float(local.max())]
-      return None
-
-  def apply_remap(img, pts_y, pts_x, lo, hi, sq_size):
-      """pts_y, pts_x は 10x10 のリスト。cv2.remap を適用して返す。"""
-      py   = np.array(pts_y, dtype=np.float64)
-      px   = np.array(pts_x, dtype=np.float64)
-      sq   = int(sq_size); lo = float(lo); hi = float(hi)
-      cell = (hi - lo) / 9.0
-      exp  = np.array([lo + i * cell for i in range(10)], dtype=np.float64)
-      oy_g, ox_g = np.mgrid[0:sq, 0:sq].astype(np.float64)
-      i_idx = np.clip(((oy_g - lo) / cell).astype(int), 0, 8)
-      j_idx = np.clip(((ox_g - lo) / cell).astype(int), 0, 8)
-      t_y   = np.clip((oy_g - exp[i_idx]) / cell, 0.0, 1.0)
-      t_x   = np.clip((ox_g - exp[j_idx]) / cell, 0.0, 1.0)
-      map_y = ((1-t_y)*((1-t_x)*py[i_idx,   j_idx  ] + t_x*py[i_idx,   j_idx+1]) +
-               t_y    *((1-t_x)*py[i_idx+1, j_idx  ] + t_x*py[i_idx+1, j_idx+1])).astype(np.float32)
-      map_x = ((1-t_y)*((1-t_x)*px[i_idx,   j_idx  ] + t_x*px[i_idx,   j_idx+1]) +
-               t_y    *((1-t_x)*px[i_idx+1, j_idx  ] + t_x*px[i_idx+1, j_idx+1])).astype(np.float32)
-      return cv2.remap(img, map_x, map_y, cv2.INTER_LINEAR)
-
-  def array_max(arr):
-      return float(arr.max())
+    @staticmethod
+    def eigen_window_centroid(eigen_map, ey, ex, hw, thresh, max_shift, img_h, img_w):
+        """期待位置周辺の最小固有値マップ加重重心を返す。[cy, cx, peak] または None。"""
+        y1 = max(0, int(ey) - int(hw)); y2 = min(int(img_h), int(ey) + int(hw) + 1)
+        x1 = max(0, int(ex) - int(hw)); x2 = min(int(img_w), int(ex) + int(hw) + 1)
+        local = eigen_map[y1:y2, x1:x2]
+        mask  = local > float(thresh)
+        if not mask.any():
+            return None
+        weights = local[mask]
+        ys, xs  = np.argwhere(mask).T
+        cy = float((weights * (y1 + ys)).sum() / weights.sum())
+        cx = float((weights * (x1 + xs)).sum() / weights.sum())
+        if abs(cy - float(ey)) < float(max_shift) and abs(cx - float(ex)) < float(max_shift):
+            return [cy, cx, float(local.max())]
+        return None
 
 PYTHON
 
@@ -188,6 +189,8 @@ PARAMS = {
   "match_off_x_min"       => 0.2,    # 数字位置のオフセット下限
   "match_off_x_max"       => 0.8,    # 数字位置のオフセット上限
 }
+
+def square_times(n) = (0...n).to_a.product((0...n).to_a)
 
 # PARAMS を sudoku_params.json で上書きする
 def load_params
@@ -242,20 +245,19 @@ def preprocess( img )
   blurred = cv2.GaussianBlur(gray, [k, k], 0)
   bs = [[w, h].min / PARAMS["adaptive_block_divisor"], 7].max
   bs += 1 if bs.even?
-  inv = cv2.adaptiveThreshold(
+  cv2.adaptiveThreshold(
     blurred, FIRST_THRESH,
     cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV,
     bs, PARAMS["adaptive_c"]
   )
-  [gray, inv]
 end
 
 # --
 # ── 外枠を検出
 # --
-def detect_frame( inv )
+def detect_frame( gray_inv )
   # 1回目: ピクセル面積最大の成分を外枠とする
-  n, labels, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity: 8).to_a
+  n, labels, stats, _ = cv2.connectedComponentsWithStats( gray_inv, connectivity: 8).to_a
   return nil if n.to_i <= 1
 
   outer_label = (1...n.to_i).max_by { |i| stats.item(i, cv2.CC_STAT_AREA).to_i }
@@ -263,29 +265,30 @@ def detect_frame( inv )
   mask_for = ->(lbl, lbs) {
     cv2.compare(lbs, np.full(PY.shape(lbs), lbl, dtype: np.int32), cv2.CMP_EQ)
   }
+  # 外枠の凸包面積からセル辺長を推定（傾き・曲がりに対応するため bounding box より正確）
+  cell_side = Math.sqrt( CV2.label_hull_area(labels, outer_label).to_f / 81.0 )
+
   frame_mask = mask_for.(outer_label, labels)
+  h, w = PY.shape( gray_inv ).to_a.map(&:to_i)
 
   # 外枠内側マスク: 外枠を黒にした画像の隅から flood fill → 背景を塗りつぶす
-  h, w = PY.shape(inv).to_a.map(&:to_i)
-  interior_base = cv2.bitwise_not(frame_mask)         # 外枠=黒, それ以外=白
-  flood_img = interior_base.copy
-  CV2.flood_fill(flood_img, nil, 0, 0, 0)             # 隅(0,0)から背景を黒で塗る
-  interior_mask = flood_img                           # 残った白 = 外枠の内側
+  flood_img = cv2.bitwise_not(frame_mask).copy
+  CV2.flood_fill(flood_img, nil, 0, 0, 0)
+  inner_inv = cv2.bitwise_and( gray_inv, flood_img )
 
-  inner_inv = cv2.bitwise_and(inv, interior_mask)     # 内側の成分のみ
+  n2, labels2, stats2, _ = cv2.connectedComponentsWithStats(inner_inv, connectivity: 8).to_a
 
-  n2, labels2, _, _ = cv2.connectedComponentsWithStats(inner_inv, connectivity: 8).to_a
-
-  # 外枠凸包面積からセル面積を推定
-  outer_hull_area = CV2.label_hull_area(labels, outer_label).to_f
-  cell_area = outer_hull_area / 81.0
+  # bounding box の長辺がセル辺長を超えるものを中枠線と判定（stats のみで判断）
 
   canvas = PY.zeros3(h, w)
   PY.apply_mask_color(canvas, frame_mask, 0, 0, 0, 0, w, h, [255, 0, 0])  # 外枠: 青
 
-  (1...n2.to_i).each do |i|
-    hull_area = CV2.label_hull_area(labels2, i).to_f
-    next if hull_area <= cell_area
+  inner_labels = (1...n2.to_i).select { |i|
+    bw = stats2.item(i, cv2.CC_STAT_WIDTH).to_i
+    bh = stats2.item(i, cv2.CC_STAT_HEIGHT).to_i
+    [bw, bh].max > cell_side
+  }
+  inner_labels.each do |i|
     inner_mask = mask_for.(i, labels2)
     PY.apply_mask_color(canvas, inner_mask, 0, 0, 0, 0, w, h, [0, 255, 0])  # 中枠: 緑
     cv2.bitwise_or(frame_mask, inner_mask, dst: frame_mask)
@@ -322,19 +325,16 @@ end
 def remove_small_components( digits_bin, cell_area )
   inv = cv2.bitwise_not( digits_bin )   # 数字=白 に反転して CCS にかける
   n, labels, stats, _ = cv2.connectedComponentsWithStats( inv, connectivity: 8 ).to_a
-  clean = inv.copy
-  (1...n.to_i).each do |i|
-    px_area  = stats.item(i, cv2.CC_STAT_AREA).to_i
-    bw       = stats.item(i, cv2.CC_STAT_WIDTH).to_i
-    bh       = stats.item(i, cv2.CC_STAT_HEIGHT).to_i
+  garbage_labels = (1...n.to_i).select do |i|
+    px_area   = stats.item(i, cv2.CC_STAT_AREA).to_i
+    bw        = stats.item(i, cv2.CC_STAT_WIDTH).to_i
+    bh        = stats.item(i, cv2.CC_STAT_HEIGHT).to_i
     bbox_area = bw * bh
-    garbage = px_area  <= cell_area * 0.01         ||   # 1. pixel 面積が極小
-              bw        >  bh * 1.5                ||   # 2. 横長
-              ( bw >= bh && bbox_area <= cell_area * 0.10 ) # 3. 縦長でなく小さい
-    next unless garbage
-    mask = cv2.compare(labels, np.full(PY.shape(labels), i, dtype: np.int32), cv2.CMP_EQ)
-    cv2.bitwise_and(clean, cv2.bitwise_not(mask), dst: clean)
+    px_area  <= cell_area * 0.01              ||   # 1. pixel 面積が極小
+    bw        >  bh * 1.5                    ||   # 2. 横長
+    ( bw >= bh && bbox_area <= cell_area * 0.10 ) # 3. 縦長でなく小さい
   end
+  clean = garbage_labels.empty? ? inv : CV2.remove_labels(inv, labels, garbage_labels)
   cv2.bitwise_not( clean )              # 白=背景・黒=数字 に戻す
 end
 
@@ -369,72 +369,112 @@ def frame_curvature( outer_contour, corners )
   max_dev / frame_size
 end
 
-def correct_curvature( frame_warped, square, sq_size, outer_contour, corners )
+def normalize_grid( frame_bin, digits_bin, sq_size, outer_contour, corners, persp_m )
   hi, lo, cell = grid_geometry( sq_size )
+  inv_persp    = CV2.invert_matrix( persp_m )
 
-  hw        = [(cell * 0.40).to_i, 4].max
-  hw_fine   = [(cell * 0.25).to_i, 4].max
-  max_shift = cell * 0.35
-  block     = [(cell * 0.08).to_i, 3].max
+  # case 1: 外枠がほぼ直線 → warpPerspective 1回で正規化
+  if frame_curvature( outer_contour, corners ) < 0.05 / 9
+    square = cv2.warpPerspective( digits_bin, persp_m, [sq_size, sq_size], borderValue: 255 )
+    return [square, nil]
+  end
+
+  # case 2: 枠が曲がっている → 元画像上で交点検出、per-cell warpPerspective で正規化
+
+  # 元画像の画像サイズ（eigen_window_centroid のクリッピングに使用）
+  img_h, img_w = PY.shape( frame_bin ).to_a.map(&:to_i)
+
+  # 均等グリッドを inv_persp で元画像空間に変換して初期推定値とする
+  # pts[i][j] = [x, y] （元画像座標）
+  m   = inv_persp.tolist.to_a.map { |row| row.to_a.map(&:to_f) }
+  pts = square_times(10).each_with_object(Array.new(10) { Array.new(10) }) do |(i, j), acc|
+    gx = lo + j * cell;  gy = lo + i * cell
+    w  = m[2][0]*gx + m[2][1]*gy + m[2][2]
+    acc[i][j] = [(m[0][0]*gx + m[0][1]*gy + m[0][2]) / w,
+                 (m[1][0]*gx + m[1][1]*gy + m[1][2]) / w]
+  end
+  exp = pts.map { |row| row.map(&:dup) }
+
+  # 元画像でのセル平均サイズに基づいて探索窓を設定
+  side_lengths = corners.zip( corners.rotate(1) ).map { |(x0,y0),(x1,y1)|
+    Math.sqrt( (x1-x0)**2 + (y1-y0)**2 )
+  }
+  avg_cell_orig = side_lengths.sum / side_lengths.size / 9.0
+  hw        = [(avg_cell_orig * 0.40).to_i, 4].max
+  hw_fine   = [(avg_cell_orig * 0.25).to_i, 4].max
+  max_shift = avg_cell_orig * 0.35
+  block     = [(avg_cell_orig * 0.08).to_i, 3].max
   block    += 1 if block.even?
 
-  # 外枠4辺の直線からの最大ズレがセル幅の5%以内なら補正不要
-  exp_y = 10.times.map { |i| lo + i * cell }
-  exp_x = exp_y.dup
-  pts_y = 10.times.map { |i| 10.times.map { |_j| exp_y[i] } }
-  pts_x = 10.times.map { |_i| 10.times.map { |j| exp_x[j] } }
-  return [square, pts_y, pts_x] if frame_curvature( outer_contour, corners ) < 0.05 / 9
+  eigen_map     = CV2.corner_min_eigen_val( frame_bin, block, 3 )
+  global_thresh = PY.array_max( eigen_map ) * 0.01
 
-  eigen_map     = CV2.corner_min_eigen_val( frame_warped, block, 3 )
-  global_thresh = CV2.array_max( eigen_map ) * 0.01
-
-  # 1パス目: 太線交点（行・列 0,3,6,9）を広い窓で検出し応答中央値を基準値とする
+  # 1パス目: 太線交点（行・列 0,3,6,9）を広い窓で検出
   thick = [0, 3, 6, 9]
   thick_responses = []
   thick.each do |i|
     thick.each do |j|
-      r = CV2.eigen_window_centroid( eigen_map, exp_y[i], exp_x[j], hw, global_thresh, max_shift, sq_size )
+      ex, ey = exp[i][j]
+      r = PY.eigen_window_centroid( eigen_map, ey, ex, hw, global_thresh, max_shift, img_h, img_w )
       next unless r
       ra = r.to_a
-      pts_y[i][j] = ra[0].to_f
-      pts_x[i][j] = ra[1].to_f
+      pts[i][j] = [ra[1].to_f, ra[0].to_f]
       thick_responses << ra[2].to_f
     end
   end
   debug_puts( "thick_responses: #{thick_responses.map{|t| t.round(1)}}" )
 
-  ref_response = thick_responses.empty? ? CV2.array_max( eigen_map ).to_f
+  ref_response = thick_responses.empty? ? PY.array_max( eigen_map ).to_f
                                         : thick_responses.sort[ thick_responses.size / 2 ]
   fine_thresh  = ref_response * 0.30
 
-  # 2パス目: 16点の双線形補間で期待位置を推定し細線交点を検出
-  10.times do |i|
-    10.times do |j|
+  # 2パス目: 双線形補間で期待位置を推定し細線交点を検出
+  square_times(10).each do |i, j|
       next if thick.include?(i) && thick.include?(j)
 
       bi = [i / 3, 2].min * 3
       bj = [j / 3, 2].min * 3
       t  = (i - bi) / 3.0
       s  = (j - bj) / 3.0
-      ey = (1-t)*(1-s)*pts_y[bi][bj]   + (1-t)*s*pts_y[bi][bj+3] +
-           t    *(1-s)*pts_y[bi+3][bj] + t    *s*pts_y[bi+3][bj+3]
-      ex = (1-t)*(1-s)*pts_x[bi][bj]   + (1-t)*s*pts_x[bi][bj+3] +
-           t    *(1-s)*pts_x[bi+3][bj] + t    *s*pts_x[bi+3][bj+3]
+      ex = (1-t)*(1-s)*pts[bi][bj][0]   + (1-t)*s*pts[bi][bj+3][0] +
+           t    *(1-s)*pts[bi+3][bj][0] + t    *s*pts[bi+3][bj+3][0]
+      ey = (1-t)*(1-s)*pts[bi][bj][1]   + (1-t)*s*pts[bi][bj+3][1] +
+           t    *(1-s)*pts[bi+3][bj][1] + t    *s*pts[bi+3][bj+3][1]
 
-      r = CV2.eigen_window_centroid( eigen_map, ey, ex, hw_fine, global_thresh, max_shift, sq_size )
-      if r && r.to_a[2].to_f >= fine_thresh
-        ra = r.to_a
-        pts_y[i][j] = ra[0].to_f
-        pts_x[i][j] = ra[1].to_f
+      r = PY.eigen_window_centroid( eigen_map, ey, ex, hw_fine, global_thresh, max_shift, img_h, img_w )
+      pts[i][j] = if r && r.to_a[2].to_f >= fine_thresh
+        ra = r.to_a; [ra[1].to_f, ra[0].to_f]
       else
-        pts_y[i][j] = ey
-        pts_x[i][j] = ex
+        [ex, ey]
       end
-    end
   end
 
-  remapped = CV2.apply_remap( square, pts_y, pts_x, lo, hi, sq_size )
-  [remapped, pts_y, pts_x]
+  square = build_normalized_square( digits_bin, pts, sq_size, lo, cell )
+  [square, pts]
+end
+
+def build_normalized_square( digits_bin, pts, sq_size, lo, cell )
+  sq = PY.full_gray( sq_size, sq_size, 255 )
+  square_times(9).each do |i, j|
+    src_pts = np.array( [
+      pts[i  ][j  ].map(&:to_f),
+      pts[i  ][j+1].map(&:to_f),
+      pts[i+1][j+1].map(&:to_f),
+      pts[i+1][j  ].map(&:to_f),
+    ], dtype: np.float32 )
+    dx = lo + j * cell
+    dy = lo + i * cell
+    dst_pts = np.array( [
+      [ dx,        dy       ],
+      [ dx + cell, dy       ],
+      [ dx + cell, dy + cell],
+      [ dx,        dy + cell],
+    ], dtype: np.float32 )
+    m      = cv2.getPerspectiveTransform( src_pts, dst_pts )
+    warped = cv2.warpPerspective( digits_bin, m, [sq_size, sq_size], borderValue: 255 )
+    CV2.copy_cell( sq, warped, dy, dy + cell, dx, dx + cell )
+  end
+  sq
 end
 
 # --
@@ -552,117 +592,65 @@ def digit_region(cell_bin, margin: 0.00)
   PY.crop(cell_bin, dy, h - dy, dx, w - dx)
 end
 
-def count_holes(cell_bin, debug_name: nil)
-  cell_bin = digit_region(cell_bin)
-
-  # 1px 白パディングを追加して外背景を必ず全周でつなげる。
-  # これにより数字が画像端に接していても外背景と孤立した穴が正しく分離される。
-  cell_bin = cv2.copyMakeBorder(cell_bin, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value: 255)
+# --
+# -- 穴の数と 6/9 判定をまとめて返す
+# --
+#   cell_bin    : 白背景・黒文字のセル画像
+#   min_area    : 有効な穴の最小面積（digit bounding box 面積 × HOLE_MIN_AREA_RATIO）
+#   digit_mid_y : 数字本体の縦中心 y（cell 座標系）。穴が1個のとき 6/9 判定に使用
+#
+#   戻り値: [hole_count, six_or_nine]
+#     hole_count  : 有効な穴の数
+#     six_or_nine : 穴が1個のとき 6 または 9、それ以外は nil
+#
+def analyze_digit_holes(cell_bin, min_area, digit_mid_y, debug_name: nil)
+  padded = cv2.copyMakeBorder(digit_region(cell_bin), 1, 1, 1, 1, cv2.BORDER_CONSTANT, value: 255)
+  h, w   = PY.shape(padded).to_a.map(&:to_i)
 
   # 白背景・黒数字の画像で白領域を数える
   # label0=黒ストローク, label1=外背景, label2以降=穴（小さいゴミは除外）
-  h, w = PY.shape(cell_bin).to_a.map(&:to_i)
-  min_area = h * w * HOLE_MIN_AREA_RATIO
-  n, labels, stats, _ = cv2.connectedComponentsWithStats(cell_bin, connectivity: 4).to_a
-  holes = (2...n.to_i).count do |lbl|
+  n, labels, stats, _ = cv2.connectedComponentsWithStats(padded, connectivity: 4).to_a
+  is_hole = ->(lbl) do
     area = stats.item(lbl, cv2.CC_STAT_AREA).to_i
     bw   = stats.item(lbl, cv2.CC_STAT_WIDTH).to_i
     bh   = stats.item(lbl, cv2.CC_STAT_HEIGHT).to_i
-    long_side  = [bw, bh].max
-    short_side = [bw, bh].min
-    aspect = short_side > 0 ? long_side.to_f / short_side : Float::INFINITY
-    area >= min_area && aspect <= HOLE_MAX_ASPECT
+    ls   = [bw, bh].max; ss = [bw, bh].min
+    area >= min_area && (ss > 0 ? ls.to_f / ss : Float::INFINITY) <= HOLE_MAX_ASPECT
   end
+  hole_labels = (2...n.to_i).select { |lbl| is_hole.(lbl) }
 
   if ENV['SUDOKU_DEBUG'] == '1' && debug_name
-    colors = [[0,0,0], [200,200,200], [0,0,255], [0,255,0], [255,0,0]]
+    colors = [[0,0,0], [200,200,200]]
     canvas = PY.zeros3(h, w)
     (0...n.to_i).each do |lbl|
-      area  = stats.item(lbl, cv2.CC_STAT_AREA).to_i
-      bw2 = stats.item(lbl, cv2.CC_STAT_WIDTH).to_i
-      bh2 = stats.item(lbl, cv2.CC_STAT_HEIGHT).to_i
-      ls  = [bw2, bh2].max; ss = [bw2, bh2].min
-      asp = ss > 0 ? ls.to_f / ss : Float::INFINITY
-      color = if lbl < 2 then colors[lbl]
-              elsif area >= min_area && asp <= HOLE_MAX_ASPECT then [0, 0, 255]   # 有効な穴=赤
-              else [0, 165, 255]                                                   # ゴミ=オレンジ
+      color = case
+              when lbl < 2;       colors[lbl]
+              when is_hole.(lbl); [0, 0, 255]   # 有効な穴=赤
+              else [0, 165, 255]                # ゴミ=オレンジ
               end
-      mask  = cv2.compare(labels, np.full(PY.shape(labels), lbl, dtype: np.int32), cv2.CMP_EQ)
+      mask = cv2.compare(labels, np.full(PY.shape(labels), lbl, dtype: np.int32), cv2.CMP_EQ)
       PY.apply_mask_color(canvas, mask, 0, 0, 0, 0, w, h, color)
     end
-    save_step(canvas, "#{debug_name}_count_holes.png")
-  end
-
-  holes
-end
-
-# --
-# -- 6/9 の判定
-# --
-#   穴が1個のとき 6 か 9 かを穴の位置で判定
-#   穴の重心位置が数字画像の中心より上 -> 9、 下 -> 6
-#
-def six_or_nine( cell_bin, debug_name: nil )
-  inner = digit_region(cell_bin)
-  h, w  = PY.shape(inner).to_a.map(&:to_i)
-
-  # 数字本体の縦中心を最大CCのバウンディングボックスから求める
-  nc, _lc, sc_cc, _ = cv2.connectedComponentsWithStats(cv2.bitwise_not(inner), connectivity: 8).to_a
-  digit_mid_y = if nc.to_i >= 2
-    dl  = (1...nc.to_i).max_by { |lbl| sc_cc.item(lbl, cv2.CC_STAT_AREA).to_i }
-    by2 = sc_cc.item(dl, cv2.CC_STAT_TOP).to_i
-    bh2 = sc_cc.item(dl, cv2.CC_STAT_HEIGHT).to_i
-    by2 + bh2 / 2.0
-  else
-    h / 2.0
-  end
-
-  padded = cv2.copyMakeBorder(inner, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value: 255)
-  ph, pw = PY.shape(padded).to_a.map(&:to_i)
-  min_area = ph * pw * HOLE_MIN_AREA_RATIO
-  n, labels, stats, _ = cv2.connectedComponentsWithStats(padded, connectivity: 4).to_a
-  hole_label = (2...n.to_i).find do |lbl|
-    area = stats.item(lbl, cv2.CC_STAT_AREA).to_i
-    bw   = stats.item(lbl, cv2.CC_STAT_WIDTH).to_i
-    bh   = stats.item(lbl, cv2.CC_STAT_HEIGHT).to_i
-    long_side  = [bw, bh].max
-    short_side = [bw, bh].min
-    aspect = short_side > 0 ? long_side.to_f / short_side : Float::INFINITY
-    area >= min_area && aspect <= HOLE_MAX_ASPECT
-  end
-  return nil unless hole_label
-
-  if ENV['SUDOKU_DEBUG'] == '1' && debug_name
-    colors = [[0,0,0], [200,200,200], [0,0,255], [0,255,0], [255,0,0]]
-    canvas = PY.zeros3(ph, pw)
-    (0...n.to_i).each do |lbl|
-      area  = stats.item(lbl, cv2.CC_STAT_AREA).to_i
-      color = if lbl < 2 then colors[lbl]
-              elsif area >= min_area then [0, 0, 255]   # 有効な穴=赤
-              else [0, 165, 255]                        # ゴミ=オレンジ
-              end
-      mask  = cv2.compare(labels, np.full(PY.shape(labels), lbl, dtype: np.int32), cv2.CMP_EQ)
-      PY.apply_mask_color(canvas, mask, 0, 0, 0, 0, pw, ph, color)
-    end
-    CV2.rectangle(canvas, 0, (digit_mid_y + 1).to_i, pw, (digit_mid_y + 2).to_i, 200, 1)
+    # padded は 1px 追加しているので digit_mid_y に +1 オフセット
+    CV2.rectangle(canvas, 0, (digit_mid_y + 1).to_i, w, (digit_mid_y + 2).to_i, 200, 200, 200, 1)
     save_step(canvas, "#{debug_name}_holes.png")
   end
 
-  # 穴の重心 y と数字本体の縦中心を比較（上 → 9、下 → 6）
-  # padded は inner に 1px 追加しているので digit_mid_y に +1 のオフセット
-  hole_mask = cv2.compare(labels, np.full(PY.shape(labels), hole_label, dtype: np.int32), cv2.CMP_EQ)
-  m = cv2.moments(hole_mask)
-  centroid_y = m['m01'].to_f / m['m00'].to_f
-  centroid_y < digit_mid_y + 1 ? 9 : 6
+  six_nine = if hole_labels.size == 1
+    hole_mask  = cv2.compare(labels, np.full(PY.shape(labels), hole_labels[0], dtype: np.int32), cv2.CMP_EQ)
+    m          = cv2.moments(hole_mask)
+    centroid_y = m['m01'].to_f / m['m00'].to_f
+    centroid_y < digit_mid_y + 1 ? 9 : 6
+  end
+
+  [hole_labels.size, six_nine]
 end
 
 # --
 # ── テンプレートマッチング
 # --
 # float32 テンプレートに対してマッチングし [min_val, max_val, min_x, min_y, result] を返す
-def match_template( cell_r )
-  tmpl_f = @tmpl_data[:tmpl_f_py]
-
+def match_template( tmpl_f, cell_r )
   th, tw = PY.shape(tmpl_f).to_a.map(&:to_i)
   ch, cw = PY.shape(cell_r).to_a.map(&:to_i)
   return [1.0, 1.0, 0, 0, nil] if th < ch || tw < cw
@@ -712,15 +700,13 @@ def build_recognized_overlay( sq_size, cells, matched_imgs )
   canvas     = PY.zeros3(sq_size, sq_size)
   _, lo, cw = grid_geometry( sq_size )
   target_h = (cw * 0.45).to_i
-  9.times do |row|
-    9.times do |col|
-      v = cells[row][col]
-      next unless v > 0
-      img = matched_imgs[row][col] || @tmpl_data[:digit_imgs_py][v - 1]
-      paste_digit( canvas, img,
-                     lo + col * cw + cw * 0.05, lo + row * cw,
-                     target_h, [0, 0, 255], align: 'top-right')
-    end
+  square_times(9).each do |row, col|
+    v = cells[row][col]
+    next unless v > 0
+    img = matched_imgs[row][col] || @tmpl_data[:digit_imgs_py][v - 1]
+    paste_digit( canvas, img,
+                   lo + col * cw + cw * 0.05, lo + row * cw,
+                   target_h, [0, 0, 255], align: 'top-right')
   end
   canvas
 end
@@ -732,15 +718,13 @@ def build_answer_overlay( sq_size, init_cells, answer )
   canvas    = PY.zeros3( sq_size, sq_size )
   _, lo, cw = grid_geometry( sq_size )
   target_h = sq_size / 15
-  9.times do |row|
-    9.times do |col|
-      next if init_cells[row][col] > 0
-      v = answer[row][col]
-      next unless v && v > 0
-      paste_digit( canvas, @tmpl_data[:digit_imgs_py][v - 1],
-                     lo + (col + 0.5) * cw, lo + (row + 0.5) * cw,
-                     target_h, [255, 60, 60], align: 'center')
-    end
+  square_times(9).each do |row, col|
+    next if init_cells[row][col] > 0
+    v = answer[row][col]
+    next unless v && v > 0
+    paste_digit( canvas, @tmpl_data[:digit_imgs_py][v - 1],
+                   lo + (col + 0.5) * cw, lo + (row + 0.5) * cw,
+                   target_h, [255, 60, 60], align: 'center')
   end
   canvas
 end
@@ -754,9 +738,25 @@ def extract_numbers( square )
   cell_h         = cell_w
   tmpl_cell_w    = @tmpl_data[:cell_w].to_f
 
-  cells       = Array.new(9) { Array.new(9, 0) }
+  # 全セルで crop サイズは同一なので、ループ前に一度だけ計算
+  crop_px   = (cell_w * CELL_CROP_RATIO * 2).to_i
+  cell_area = crop_px * crop_px
+
+  # テンプレートをセルサイズ基準で3スケールにリサイズ（セルのリサイズ不要）
+  tmpl_orig = @tmpl_data[:tmpl_f_py]
+  th_orig, tw_orig = PY.shape(tmpl_orig).to_a.map(&:to_i)
+  # テンプレートをネイティブサイズ基準で3スケール事前生成（小さいまま）
+  # セルは tmpl_cell_w に1回縮小してマッチング
+  scaled_tmpls = [0.93, 1.00, 1.07].map { |s|
+    tw_s = [(tw_orig * s).to_i, 1].max
+    th_s = [(th_orig * s).to_i, 1].max
+    [PY.astype_float32( CV2.resize(tmpl_orig, tw_s, th_s) ), tmpl_cell_w * s]
+  }
+
+  cells        = Array.new(9) { Array.new(9, 0) }
   matched_imgs = Array.new(9) { Array.new(9, nil) }
-  (0..8).to_a.product((0..8).to_a).each do |row, col|
+  digit_bboxes = []
+  square_times(9).each do |row, col|
     # ( cx, cy ) : cell 中央の座標
     cx, cy = lo + (col + 0.5) * cell_w, lo + (row + 0.5) * cell_h
     cell   = PY.crop( square,
@@ -768,49 +768,49 @@ def extract_numbers( square )
       save_step( cell, "cell#{row}#{col}.png"  )
     end
 
-    cell_sh  = PY.shape(cell).to_a.map(&:to_i)
-    cell_area = cell_sh[0] * cell_sh[1]
 
     # 連結成分からゴミ（枠線残滓）を除いて数字候補を選ぶ
     # bbox_ratio >= max_bbox_ratio のものは枠線残滓としてスキップし、次の候補を試す
-    cell_inv2 = cv2.bitwise_not(cell)
-    nc2, _lc2, sc2, _ = cv2.connectedComponentsWithStats(cell_inv2, connectivity: 8).to_a
-    next if nc2.to_i < 2
+    cell_inv = cv2.bitwise_not(cell)
+    nc, _lc, sc, _ = cv2.connectedComponentsWithStats(cell_inv, connectivity: 8).to_a
+    next if nc.to_i < 2
     max_bbox = PARAMS.fetch("max_bbox_ratio", 0.7)
-    dl2 = (1...nc2.to_i)
-            .sort_by { |lbl| -sc2.item(lbl, cv2.CC_STAT_AREA).to_i }
-            .find do |lbl|
-              bw_ = sc2.item(lbl, cv2.CC_STAT_WIDTH).to_i
-              bh_ = sc2.item(lbl, cv2.CC_STAT_HEIGHT).to_i
-              (bw_ * bh_).to_f / cell_area < max_bbox
-            end
-    next unless dl2
-    bw2   = sc2.item(dl2, cv2.CC_STAT_WIDTH).to_i
-    bh2   = sc2.item(dl2, cv2.CC_STAT_HEIGHT).to_i
-    area2 = sc2.item(dl2, cv2.CC_STAT_AREA).to_i
-    aspect     = bh2 > 0 ? bw2.to_f / bh2 : 1.0
-    bbox_ratio = (bw2 * bh2).to_f / cell_area
+    dl = (1...nc.to_i)
+           .sort_by { |lbl| -sc.item(lbl, cv2.CC_STAT_AREA).to_i }
+           .find do |lbl|
+             bw_ = sc.item(lbl, cv2.CC_STAT_WIDTH).to_i
+             bh_ = sc.item(lbl, cv2.CC_STAT_HEIGHT).to_i
+             (bw_ * bh_).to_f / cell_area < max_bbox
+           end
+    next unless dl
+    bw   = sc.item(dl, cv2.CC_STAT_WIDTH).to_i
+    bh   = sc.item(dl, cv2.CC_STAT_HEIGHT).to_i
+    area = sc.item(dl, cv2.CC_STAT_AREA).to_i
+    bx   = sc.item(dl, cv2.CC_STAT_LEFT).to_i
+    by   = sc.item(dl, cv2.CC_STAT_TOP).to_i
+    x0_sq = (cx - cell_w * CELL_CROP_RATIO).to_i
+    y0_sq = (cy - cell_h * CELL_CROP_RATIO).to_i
+    digit_bboxes << [x0_sq + bx, y0_sq + by, x0_sq + bx + bw, y0_sq + by + bh]
+    aspect     = bh > 0 ? bw.to_f / bh : 1.0
+    bbox_ratio = (bw * bh).to_f / cell_area
 
-    debug_puts "cell[#{row}][#{col}] cc_area_ratio=#{(area2.to_f/cell_area).round(4)} aspect=#{aspect.round(3)} bbox_ratio=#{bbox_ratio.round(3)}"
+    debug_puts "cell[#{row}][#{col}] cc_area_ratio=#{(area.to_f/cell_area).round(4)} aspect=#{aspect.round(3)} bbox_ratio=#{bbox_ratio.round(3)}"
 
     # 細長くない成分（幅/高さ >= 0.5）は面積閾値を高くする
     # 細長い場合（「1」など）は面積が小さいので低い閾値のまま
     min_ratio = aspect < 0.5 ? PARAMS.fetch("blank_dark_ratio_thin", 0.02)
                               : PARAMS["blank_dark_ratio"]
-    next if area2.to_f / cell_area < min_ratio
+    next if area.to_f / cell_area < min_ratio
 
     cell_for_match = cell
 
-    rw = tmpl_cell_w / cell_sh[1]
-    nw = [(cell_sh[1] * rw).to_i, 1].max
-    nh = [(cell_sh[0] * rw).to_i, 1].max
-
-    # フォントサイズの±10% 変化に対応するため複数スケールで試して最良を採用
-    min_val, max_val, min_x, min_y, match_result = [0.90, 0.95, 1.00, 1.05, 1.10].map do |scale|
-      snw = [(nw * scale).to_i, 1].max
-      snh = [(nh * scale).to_i, 1].max
-      match_template( PY.astype_float32(cv2.resize(cell, [snw, snh])) )
-    end.min_by { |v, *| v }
+    # セルを tmpl_cell_w にリサイズ（テンプレートはネイティブサイズ基準で小さいまま）
+    tw = tmpl_cell_w.to_i
+    cell_r = PY.astype_float32( CV2.resize(cell, tw, tw) )
+    min_val, max_val, min_x, min_y, match_result, matched_digit_w =
+      scaled_tmpls.map { |tmpl, digit_w|
+        [*match_template( tmpl, cell_r ), digit_w]
+      }.min_by { |v, *| v }
 
     r_h, r_w  = PY.shape( match_result ).to_a.map(&:to_i)
     row_h     = r_h.to_f / @tmpl_data[:num_rows]
@@ -827,7 +827,7 @@ def extract_numbers( square )
       next
     end
 
-    number_f   = (min_x + nw / 2.0) / tmpl_cell_w
+    number_f   = (min_x + tw / 2.0) / matched_digit_w
     number     = number_f.to_i
     off_x      = number_f - number
     debug_puts "  number_f: #{number_f.round(2)}, off_x:#{off_x.round(3)}"
@@ -836,14 +836,17 @@ def extract_numbers( square )
     # 3→0, 5→0, 6→1(下), 9→1(上), 8→2 という特徴で補正する
     # 3 は穴が0個なら元の判定を維持、1個以上なら9に補正
     if [3, 5, 6, 8, 9].include?(number)
-      holes = count_holes(cell, debug_name: "cell#{row}#{col}")
+      x1, y1, x2, y2 = digit_bboxes[-1]
+      min_area    = (x2 - x1) * (y2 - y1) * HOLE_MIN_AREA_RATIO
+      digit_mid_y = by + bh / 2.0
+      holes, classified = analyze_digit_holes(cell, min_area, digit_mid_y, debug_name: "cell#{row}#{col}")
       debug_puts "  holes= #{holes}"
       corrected = if number == 3
-                    holes >= 1 ? six_or_nine(cell, debug_name: "cell#{row}#{col}") : nil
+                    holes >= 1 ? classified : nil
                   else
                     case holes
                     when 0; 5
-                    when 1; six_or_nine(cell, debug_name: "cell#{row}#{col}")
+                    when 1; classified
                     when 2; 8
                     end
                   end
@@ -874,7 +877,7 @@ def extract_numbers( square )
     cells[row][col]        = number
     matched_imgs[row][col] = template_digit_img_row( @tmpl_data[:tmpl_gray_py], number, row_idx, @tmpl_data[:num_rows] )
   end
-  [cells, matched_imgs]
+  [cells, matched_imgs, digit_bboxes]
 end
 
 # --
@@ -898,16 +901,54 @@ end
 # --
 # -- 答えを元の画像に重ね合わせ
 # --
-def overlay_answer( original, init_cells, answer, sq_size, persp_m  )
-  h_, w_  = PY.shape(original).to_a.map(&:to_i)
-  ans_img = build_answer_overlay( sq_size, init_cells, answer )
-  warped  = cv2.warpPerspective( ans_img, persp_m, [ w_, h_ ],
-                                  flags: cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
-                                )
-  gray_mask = cv2.cvtColor( warped, cv2.COLOR_BGR2GRAY )
-  mask      = CV2.threshold( gray_mask, 1, 255, cv2.THRESH_BINARY)
-  mask_inv  = cv2.bitwise_not( mask)
-  bg = cv2.bitwise_and( original, original, mask: mask_inv )
-  fg = cv2.bitwise_and( warped,   warped,   mask: mask )
-  cv2.add( bg, fg )
+def overlay_answer( original, init_cells, answer, sq_size, persp_m, pts )
+  hi, lo, cw  = grid_geometry( sq_size )
+  cell_size   = cw.to_i
+  target_h    = sq_size / 15
+  result      = original.copy
+  inv_persp   = CV2.invert_matrix( persp_m )
+  img_h, img_w = PY.shape( original ).to_a.map(&:to_i)
+
+  if pts.nil?
+    # case 1: 正方形キャンバスに全数字を描いて warpPerspective 1回で元画像に戻す
+    sq_canvas = PY.zeros3( sq_size, sq_size )
+    square_times(9).each do |row, col|
+      next if init_cells[row][col] > 0
+      v = answer[row][col]
+      next unless v && v > 0
+      paste_digit( sq_canvas, @tmpl_data[:digit_imgs_py][v - 1],
+                   lo + (col + 0.5) * cw, lo + (row + 0.5) * cw,
+                   target_h, [255, 60, 60], align: 'center' )
+    end
+    warped_back = cv2.warpPerspective( sq_canvas, inv_persp, [img_w, img_h] )
+    mask = CV2.threshold( CV2.bgr_to_gray( warped_back ), 1, 255, cv2.THRESH_BINARY )
+    PY.copy_where( result, warped_back, mask )
+  else
+    # case 2: 元画像空間の交点座標を使いセル毎に warpPerspective
+    square_times(9).each do |row, col|
+      next if init_cells[row][col] > 0
+      v = answer[row][col]
+      next unless v && v > 0
+
+      cell_img = PY.zeros3( cell_size, cell_size )
+      paste_digit( cell_img, @tmpl_data[:digit_imgs_py][v - 1],
+                   cell_size / 2.0, cell_size / 2.0,
+                   target_h, [255, 60, 60], align: 'center' )
+
+      orig_corners = [ pts[row][col], pts[row][col+1],
+                       pts[row+1][col+1], pts[row+1][col] ]
+      xs = orig_corners.map(&:first);  ys = orig_corners.map(&:last)
+      x1 = [xs.min.floor, 0].max;     x2 = [xs.max.ceil, img_w].min
+      y1 = [ys.min.floor, 0].max;     y2 = [ys.max.ceil, img_h].min
+      next if x1 >= x2 || y1 >= y2
+
+      s       = (cell_size - 1).to_f
+      src_pts = np.array( [[0,0],[s,0],[s,s],[0,s]], dtype: np.float32 )
+      dst_pts = np.array( orig_corners.map { |x, y| [x - x1, y - y1] }, dtype: np.float32 )
+      m       = cv2.getPerspectiveTransform( src_pts, dst_pts )
+      warped  = cv2.warpPerspective( cell_img, m, [x2 - x1, y2 - y1] )
+      CV2.blend_masked( result, warped, y1, y2, x1, x2 )
+    end
+  end
+  result
 end
